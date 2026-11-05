@@ -60,6 +60,8 @@ tr.alerta td{background:var(--badbg)}
 .bar i{display:block;height:100%;background:var(--ok)}
 .bar.over i{background:var(--bad)}
 svg text{fill:var(--mut);font-size:10px}
+#mbk{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:8}
+#mbx{width:min(460px,94vw);margin:0;box-shadow:0 10px 40px rgba(0,0,0,.4)}
 </style>
 </head>
 <body>
@@ -88,6 +90,7 @@ svg text{fill:var(--mut);font-size:10px}
     <div id="view"></div>
   </div>
 </main>
+<div id="mbk"><div id="mbx" class="card"></div></div>
 <div id="toast"></div>
 
 <script>
@@ -108,10 +111,10 @@ const ETIQ = {
   acceso_denegado:"Acceso denegado", bloqueo_pendientes:"Bloqueado por vencidos",
   reserva_bloqueada:"Equipo en uso por otro", vencido:"Préstamo vencido",
   faltante:"Faltante en inventario", inconsistencia:"Inconsistencia (posible copia)",
-  tag_invalido:"Etiqueta inválida", mantenimiento:"Mantenimiento requerido"
+  tag_invalido:"Etiqueta inválida", mantenimiento:"Mantenimiento requerido", sin_confirmar:"Falta confirmar en la web"
 };
 const ALTAS = ["vencido","inconsistencia","tag_invalido","faltante","incidencia_danado","incidencia_incompleto","mantenimiento"];
-const AVISOS = ["acceso_denegado","fuera_horario","bloqueo_pendientes","reserva_bloqueada"];
+const AVISOS = ["acceso_denegado","fuera_horario","bloqueo_pendientes","reserva_bloqueada","sin_confirmar"];
 const ALERTAS = ALTAS.concat(AVISOS);
 
 let EV = [];        // eventos, mas nuevo primero
@@ -190,6 +193,7 @@ function suscribir(){
   chan = db.channel("lab")
     .on("postgres_changes",{event:"INSERT",schema:"public",table:"events"}, p => {
       EV.unshift(p.new); render();
+      if(p.new.type==="login") abrirPrestamo(p.new); else if(M && p.new.user_id===M.uid) eventoM(p.new);
       if(ALERTAS.includes(p.new.type)) toast("⚠ " + (ETIQ[p.new.type]||p.new.type));
     })
     .on("postgres_changes",{event:"*",schema:"public",table:"assets_info"}, async()=>{ await fetchInfo(); render(); })
@@ -214,7 +218,7 @@ function compute(){
       if(e.level) a.level = e.level;
       switch(e.type){
         case "alta_activo": a.status=0; a.holder=""; a.since=t; break;
-        case "prestamo": a.status=1; a.holder=e.user_id; a.since=t; a.uses++; break;
+        case "prestamo": a.status=1; a.holder=e.user_id; a.since=t; a.uses++; a.ll=e.limit_min||0; break;
         case "devolucion": a.status=0; a.holder=""; a.since=t; break;
         case "incidencia_danado":
         case "incidencia_incompleto": a.status=2; a.since=t; a.incid++; break;
@@ -234,7 +238,7 @@ function compute(){
   const now = Date.now();
   for(const id in A){
     const a = A[id];
-    a.limit = limitOf(id);
+    a.limit = (a.status===1 && a.ll) ? a.ll : limitOf(id);
     a.elapsed = a.status===1 ? (now - a.since)/60000 : 0;
     a.overdue = a.status===1 && a.elapsed > a.limit;
   }
@@ -451,8 +455,8 @@ function bAlertas(){
 function bUsuarios(){
   const list = Object.values(U).sort((a,b)=>b.loans-a.loans);
   if(!list.length) return '<div class="card empty">Sin usuarios. Graba una tarjeta con <b>U 2 JUAN0001</b>.</div>';
-  return '<div class="card wrap"><table><thead><tr><th>Usuario</th><th>Nivel</th><th>Ingresos</th><th>Préstamos</th><th>Vencidos</th><th>Incidencias</th><th>Denegados</th><th>Último</th><th></th></tr></thead><tbody>'
-    + list.map(u=>'<tr class="'+(u.overdue?'alerta':'')+'"><td><a class="lnk" data-act="hist" data-id="'+esc(u.id)+'">'+uname(u.id)+'</a></td><td>'+(u.level||"—")+'</td><td>'+u.logins+'</td><td>'+u.loans+'</td><td>'+u.overdue+'</td><td>'+u.incid+'</td><td>'+u.denied+'</td><td>'+fdate(u.last)+'</td><td><button data-act="editU" data-id="'+esc(u.id)+'">Editar</button></td></tr>').join("")
+  return '<div class="card wrap"><table><thead><tr><th>Usuario</th><th>Nivel</th><th>Ingresos</th><th>Préstamos</th><th>Vencidos</th><th>Incidencias</th><th>Denegados</th><th>Último</th><th>Datos</th><th></th></tr></thead><tbody>'
+    + list.map(u=>'<tr class="'+(u.overdue?'alerta':'')+'"><td><a class="lnk" data-act="hist" data-id="'+esc(u.id)+'">'+uname(u.id)+'</a></td><td>'+(u.level||"—")+'</td><td>'+u.logins+'</td><td>'+u.loans+'</td><td>'+u.overdue+'</td><td>'+u.incid+'</td><td>'+u.denied+'</td><td>'+fdate(u.last)+'</td><td>'+esc(((UI[u.id]?.career||"")+" "+(UI[u.id]?.doc||"")).trim())+'</td><td><button data-act="editU" data-id="'+esc(u.id)+'">Editar</button> <button data-act="rewU" data-id="'+esc(u.id)+'">Regrabar tarjeta</button></td></tr>').join("")
     + '</tbody></table></div>';
 }
 async function editarUsuario(id){
@@ -470,8 +474,10 @@ async function fetchCmd(){
 function sAltas(){
   return '<div class="card"><h2>Registrar equipo o tarjeta</h2><div class="filters">'
     + '<select id="aK"><option value="A">Equipo</option><option value="U">Usuario (tarjeta)</option></select>'
-    + '<input id="aId" placeholder="ID (hasta 8 letras/números)" maxlength="8">'
-    + '<input id="aN" placeholder="Nombre (opcional)">'
+    + '<input id="aId" placeholder="ID (vacío = automático en usuarios)" maxlength="8">'
+    + '<input id="aN" placeholder="Nombre completo">'
+    + '<input id="aD" placeholder="CI / documento (usuarios)">'
+    + '<input id="aC" placeholder="Carrera / curso (usuarios)">'
     + '<select id="aL" title="Nivel (equipo: nivel requerido · usuario: su nivel)"><option>1</option><option>2</option><option>3</option><option>4</option></select>'
     + '<input id="aM" type="number" min="1" value="'+DEFAULT_LIMIT+'" title="Límite en minutos (solo equipos)" style="width:90px">'
     + '<button class="pri" onclick="crearAlta()">Enviar al lector</button></div>'
@@ -479,16 +485,32 @@ function sAltas(){
 }
 async function crearAlta(){
   const kind = $("aK").value;
-  const id = $("aId").value.trim().toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,8);
+  const nm = $("aN").value.trim().slice(0,80);
+  if(kind==="U" && !nm) return toast("Escribe el nombre completo del usuario");
+  let id = $("aId").value.trim().toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,8);
+  if(!id && kind==="U") id = genId(nm);
   if(!id) return toast("Escribe un ID válido");
+  if(kind==="U" && U[id] && !confirm("El usuario "+id+" ya existe. ¿Regrabar su tarjeta?")) return;
   if(kind==="A" && A[id] && !confirm("El equipo "+id+" ya existe. ¿Regrabar y reiniciar su historial?")) return;
   const lim = kind==="A" ? Math.max(1, parseInt($("aM").value,10) || DEFAULT_LIMIT) : 0;
   const {error} = await db.from("commands").insert({kind, ext_id:id, level:+$("aL").value, limit_min:lim});
   if(error) return toast("Error: "+error.message);
-  const nm = $("aN").value.trim().slice(0,80), now = new Date().toISOString();
+  const now = new Date().toISOString();
   if(kind==="A") await db.from("assets_info").upsert({asset_id:id, name:nm || AI[id]?.name || "", limit_min:lim, updated_at:now});
-  else if(nm)    await db.from("users_info").upsert({user_id:id, full_name:nm, updated_at:now});
-  toast("Enviado. Acerca la tarjeta al lector."); await fetchCmd(); await fetchInfo(); render();
+  else await db.from("users_info").upsert({user_id:id, full_name:nm, doc:$("aD").value.trim().slice(0,30), career:$("aC").value.trim().slice(0,60), updated_at:now});
+  toast("Enviado ("+id+"). Acerca la tarjeta al lector."); await fetchCmd(); await fetchInfo(); render();
+}
+function genId(nm){
+  const ini = nm.toUpperCase().normalize("NFD").replace(/[^A-Z ]/g,"").split(/\s+/).filter(Boolean).map(w=>w[0]).join("").slice(0,4) || "USR";
+  let id; do { id = ini + (Math.floor(Math.random()*9000)+1000); } while(U[id] || UI[id]);
+  return id;
+}
+async function regrabarUsuario(id){
+  const lv = parseInt(prompt("Nivel de "+id+" (1-4) para regrabar su tarjeta", U[id]?.level||1),10);
+  if(!(lv>=1 && lv<=4)) return;
+  const {error} = await db.from("commands").insert({kind:"U", ext_id:id, level:lv, limit_min:0});
+  if(error) return toast("Error: "+error.message);
+  toast("Acerca la tarjeta de "+id+" al lector (60 s)"); await fetchCmd(); render();
 }
 async function cancelarAlta(id){
   await db.from("commands").update({status:"cancelled"}).eq("id",id);
@@ -503,6 +525,50 @@ function bAltas(){
     + '</tbody></table></div>';
 }
 
+// ---------- VENTANA FLOTANTE DE PRESTAMO ----------
+const PREST_VENTANA = 60000;   // debe ser igual a SESSION_MS del firmware
+let M = null, Mt = null;
+function abrirPrestamo(e){
+  cerrarPrestamo();
+  M = {uid:e.user_id, step:0, min:DEFAULT_LIMIT, until:Date.now()+PREST_VENTANA};
+  $("mbk").style.display = "flex"; pintarM();
+  Mt = setInterval(()=>{ if(!M) return; if(Date.now()>M.until) return cerrarPrestamo();
+    const c=$("mcd"); if(c) c.textContent="Sesión del lector: "+Math.round((M.until-Date.now())/1000)+" s"; },1000);
+}
+function pintarM(){
+  if(!M) return; compute();
+  const id=M.uid, u=U[id]||{}, act=Object.values(A).filter(a=>a.status===1 && a.holder===id).length, bloq=(u.overdue||0)>0;
+  let h = '<h2>Préstamo · '+uname(id)+'</h2>'+(UI[id]?.career?'<p class="mut">'+esc(UI[id].career)+'</p>':'')+'<p>Nivel <b>'+(u.level||"—")+'</b> · Préstamos <b>'+(u.loans||0)+'</b> · Activos <b>'+act+'</b> · Vencidos <b>'+(u.overdue||0)+'</b></p>';
+  if(bloq) h += '<p><span class="badge b-bad">Bloqueado: tiene préstamos vencidos</span></p>';
+  if(M.err) h += '<p><span class="badge b-warn">'+esc(M.err)+'</span></p>';
+  if(M.step===0){
+    h += '<p>Tiempo del préstamo:</p><div class="filters"><select id="mT">'+[30,60,120,180,240,480].map(m=>'<option value="'+m+'"'+(m===M.min?' selected':'')+'>'+fdur(m)+'</option>').join("")+'</select>'
+      + '<input id="mC" type="number" min="1" placeholder="otro (min)" style="width:120px"></div>'
+      + '<p class="mut">Autoriza y luego acerca el equipo al lector.</p><button class="pri" '+(bloq?'disabled':'')+' onclick="autorizarM()">Autorizar préstamo</button> ';
+  } else if(M.step===1){
+    h += '<p><span class="badge b-info">Autorizado por '+fdur(M.min)+'</span> Esperando el equipo… acércalo al lector.</p>';
+  } else {
+    h += '<p><span class="badge b-ok">✔ Préstamo registrado</span></p><p>'+aname(M.asset)+' · hasta '+new Date(M.hasta).toLocaleTimeString("es-BO",{timeStyle:"short"})+'</p>';
+  }
+  $("mbx").innerHTML = h + '<button onclick="cerrarPrestamo()">'+(M.step===2?"Cerrar":"Cancelar")+'</button> <small id="mcd" class="mut"></small>';
+}
+async function autorizarM(){
+  const min = Math.max(1, parseInt($("mC").value,10) || parseInt($("mT").value,10));
+  const {data,error} = await db.from("commands").insert({kind:"L", ext_id:M.uid, level:(U[M.uid]?.level||1), limit_min:min}).select().single();
+  if(error) return toast("Error: "+error.message);
+  M.authId=data.id; M.min=min; M.step=1; M.err=""; M.until=Date.now()+PREST_VENTANA; pintarM();
+}
+function eventoM(e){
+  if(e.type==="prestamo"){ M.step=2; M.asset=e.asset_id; M.hasta=Date.now()+M.min*60000; M.err=""; }
+  else if(AVISOS.includes(e.type)) M.err=(ETIQ[e.type]||e.type)+(e.asset_id?" · "+e.asset_id:"");
+  else return;
+  pintarM();
+}
+function cerrarPrestamo(){
+  if(M && M.authId && M.step===1) db.from("commands").update({status:"cancelled"}).eq("id",M.authId).then(()=>fetchCmd());
+  M=null; clearInterval(Mt); $("mbk").style.display="none";
+}
+
 // ---------- clicks (delegacion; evita inyectar datos en onclick) ----------
 document.addEventListener("click", ev=>{
   const tb = ev.target.closest("#nav button[data-tab]");
@@ -512,6 +578,7 @@ document.addEventListener("click", ev=>{
   if(el.dataset.act==="editA") editarEquipo(id);
   if(el.dataset.act==="editU") editarUsuario(id);
   if(el.dataset.act==="cancelC") cancelarAlta(id);
+  if(el.dataset.act==="rewU") regrabarUsuario(id);
   if(el.dataset.act==="hist"){ setTab("historial"); $("q").value=id; render(); }
 });
 $("pass").addEventListener("keydown", e=>{ if(e.key==="Enter") entrar(); });
