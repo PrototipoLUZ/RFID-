@@ -120,6 +120,7 @@ let UI = {};        // users_info
 let A = {}, U = {}; // estado calculado
 let tab = "resumen";
 let chan = null;
+let CMD = [];   // solicitudes de alta remota
 
 // ---------- utilidades ----------
 const $ = id => document.getElementById(id);
@@ -180,6 +181,7 @@ async function fetchInfo(){
 async function recargar(){
   EV = await fetchEvents();
   await fetchInfo();
+  await fetchCmd();
   render();
 }
 
@@ -192,6 +194,7 @@ function suscribir(){
     })
     .on("postgres_changes",{event:"*",schema:"public",table:"assets_info"}, async()=>{ await fetchInfo(); render(); })
     .on("postgres_changes",{event:"*",schema:"public",table:"users_info"}, async()=>{ await fetchInfo(); render(); })
+    .on("postgres_changes",{event:"*",schema:"public",table:"commands"}, async()=>{ await fetchCmd(); render(); })
     .subscribe(s => {
       const on = s === "SUBSCRIBED";
       $("dot").className = "dot" + (on ? " on" : "");
@@ -258,7 +261,8 @@ const TABS = {
   prestamos: {label:"Préstamos activos", body:bPrestamos},
   historial: {label:"Historial", shell:sHistorial, body:bHistorial},
   alertas:   {label:"Alertas",   body:bAlertas},
-  usuarios:  {label:"Usuarios",  body:bUsuarios}
+  usuarios:  {label:"Usuarios",  body:bUsuarios},
+  altas:     {label:"Altas",     shell:sAltas, body:bAltas}
 };
 function armarNav(){
   $("nav").innerHTML = Object.keys(TABS).map(k => '<button data-tab="'+k+'">'+TABS[k].label+'</button>').join("");
@@ -458,6 +462,47 @@ async function editarUsuario(id){
   toast("Usuario actualizado"); await fetchInfo(); render();
 }
 
+// ---------- ALTAS REMOTAS (equipos y tarjetas desde la web) ----------
+async function fetchCmd(){
+  const r = await db.from("commands").select("*").order("id",{ascending:false}).limit(30);
+  CMD = r.data || [];
+}
+function sAltas(){
+  return '<div class="card"><h2>Registrar equipo o tarjeta</h2><div class="filters">'
+    + '<select id="aK"><option value="A">Equipo</option><option value="U">Usuario (tarjeta)</option></select>'
+    + '<input id="aId" placeholder="ID (hasta 8 letras/números)" maxlength="8">'
+    + '<input id="aN" placeholder="Nombre (opcional)">'
+    + '<select id="aL" title="Nivel (equipo: nivel requerido · usuario: su nivel)"><option>1</option><option>2</option><option>3</option><option>4</option></select>'
+    + '<input id="aM" type="number" min="1" value="'+DEFAULT_LIMIT+'" title="Límite en minutos (solo equipos)" style="width:90px">'
+    + '<button class="pri" onclick="crearAlta()">Enviar al lector</button></div>'
+    + '<p class="mut">Tras enviar, acerca una tarjeta/etiqueta <b>en blanco</b> al lector del ESP32 (tienes 60 s). Nivel 4 = administrador.</p></div>';
+}
+async function crearAlta(){
+  const kind = $("aK").value;
+  const id = $("aId").value.trim().toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,8);
+  if(!id) return toast("Escribe un ID válido");
+  if(kind==="A" && A[id] && !confirm("El equipo "+id+" ya existe. ¿Regrabar y reiniciar su historial?")) return;
+  const lim = kind==="A" ? Math.max(1, parseInt($("aM").value,10) || DEFAULT_LIMIT) : 0;
+  const {error} = await db.from("commands").insert({kind, ext_id:id, level:+$("aL").value, limit_min:lim});
+  if(error) return toast("Error: "+error.message);
+  const nm = $("aN").value.trim().slice(0,80), now = new Date().toISOString();
+  if(kind==="A") await db.from("assets_info").upsert({asset_id:id, name:nm || AI[id]?.name || "", limit_min:lim, updated_at:now});
+  else if(nm)    await db.from("users_info").upsert({user_id:id, full_name:nm, updated_at:now});
+  toast("Enviado. Acerca la tarjeta al lector."); await fetchCmd(); await fetchInfo(); render();
+}
+async function cancelarAlta(id){
+  await db.from("commands").update({status:"cancelled"}).eq("id",id);
+  await fetchCmd(); render();
+}
+function bAltas(){
+  if(!CMD.length) return '<div class="card empty">Sin solicitudes todavía</div>';
+  const st = {pending:["b-warn","Esperando tarjeta"],done:["b-ok","Grabada"],error:["b-bad","Error"],expired:["b-bad","Expirada"],cancelled:["b-info","Cancelada"]};
+  return '<div class="card wrap"><table><thead><tr><th>Fecha</th><th>Tipo</th><th>ID</th><th>Nivel</th><th>Límite</th><th>Estado</th><th></th></tr></thead><tbody>'
+    + CMD.map(c=>{ const s = st[c.status] || ["b-info",c.status];
+      return '<tr><td>'+fdate(new Date(c.created_at).getTime())+'</td><td>'+(c.kind==="A"?"Equipo":"Usuario")+'</td><td>'+esc(c.ext_id)+'</td><td>'+c.level+'</td><td>'+(c.kind==="A"?fdur(c.limit_min):"—")+'</td><td><span class="badge '+s[0]+'">'+s[1]+'</span></td><td>'+(c.status==="pending"?'<button data-act="cancelC" data-id="'+c.id+'">Cancelar</button>':'')+'</td></tr>'; }).join("")
+    + '</tbody></table></div>';
+}
+
 // ---------- clicks (delegacion; evita inyectar datos en onclick) ----------
 document.addEventListener("click", ev=>{
   const tb = ev.target.closest("#nav button[data-tab]");
@@ -466,6 +511,7 @@ document.addEventListener("click", ev=>{
   const id = el.dataset.id;
   if(el.dataset.act==="editA") editarEquipo(id);
   if(el.dataset.act==="editU") editarUsuario(id);
+  if(el.dataset.act==="cancelC") cancelarAlta(id);
   if(el.dataset.act==="hist"){ setTab("historial"); $("q").value=id; render(); }
 });
 $("pass").addEventListener("keydown", e=>{ if(e.key==="Enter") entrar(); });
