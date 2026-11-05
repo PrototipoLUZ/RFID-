@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Control de Activos - Lab Electrónica</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<style>
+:root{
+  --bg:#f4f6f9; --card:#fff; --txt:#1c2430; --mut:#6b7686; --line:#e2e6ec;
+  --pri:#2563eb; --ok:#15803d; --okbg:#dcfce7; --warn:#b45309; --warnbg:#fef3c7;
+  --bad:#b91c1c; --badbg:#fee2e2; --info:#1d4ed8; --infobg:#dbeafe; --bar:#3b82f6;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0f141b; --card:#1a212b; --txt:#e6eaf0; --mut:#98a3b3; --line:#2b3441;
+    --pri:#60a5fa; --ok:#4ade80; --okbg:#14532d; --warn:#fbbf24; --warnbg:#4a3508;
+    --bad:#f87171; --badbg:#4c1d1d; --info:#93c5fd; --infobg:#1e3a8a; --bar:#60a5fa;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt);font-size:14px}
+header{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;padding:12px 16px;background:var(--card);border-bottom:1px solid var(--line)}
+header h1{font-size:18px;margin:0}
+.right{display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--mut)}
+.dot{width:10px;height:10px;border-radius:50%;background:#9ca3af;display:inline-block}
+.dot.on{background:#22c55e}
+main{max-width:1150px;margin:0 auto;padding:14px}
+button,select,input{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--txt)}
+button{cursor:pointer}
+button.pri{background:var(--pri);color:#fff;border-color:var(--pri)}
+button.dan{color:var(--bad);border-color:var(--bad)}
+nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+nav button.act{background:var(--pri);color:#fff;border-color:var(--pri)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.card h2{font-size:15px;margin:0 0 10px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+.kpi b{display:block;font-size:26px}
+.kpi span{color:var(--mut);font-size:12px}
+.kpi.bad b{color:var(--bad)} .kpi.warn b{color:var(--warn)} .kpi.ok b{color:var(--ok)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{color:var(--mut);font-size:12px;font-weight:600}
+tr.alerta td{background:var(--badbg)}
+.badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;font-weight:600}
+.b-ok{background:var(--okbg);color:var(--ok)} .b-warn{background:var(--warnbg);color:var(--warn)}
+.b-bad{background:var(--badbg);color:var(--bad)} .b-info{background:var(--infobg);color:var(--info)}
+.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.filters input[type=search]{flex:1;min-width:180px}
+.lnk{color:var(--pri);text-decoration:none;cursor:pointer}
+.mut{color:var(--mut)}
+.empty{color:var(--mut);padding:14px;text-align:center}
+#login{max-width:340px;margin:60px auto}
+#login input{width:100%;margin:5px 0}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;padding:10px 16px;border-radius:8px;display:none;z-index:9}
+.bar{height:8px;background:var(--line);border-radius:99px;overflow:hidden;min-width:90px}
+.bar i{display:block;height:100%;background:var(--ok)}
+.bar.over i{background:var(--bad)}
+svg text{fill:var(--mut);font-size:10px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🔬 Control de Activos · Lab Electrónica</h1>
+  <div class="right" id="hdr" style="display:none">
+    <span><span class="dot" id="dot"></span> <span id="live">sin conexión</span></span>
+    <span id="who"></span>
+    <button onclick="recargar()">Actualizar</button>
+    <button onclick="salir()">Salir</button>
+  </div>
+</header>
+
+<main>
+  <div id="login" class="card">
+    <h2>Ingresar</h2>
+    <input id="email" type="email" placeholder="Correo" autocomplete="username">
+    <input id="pass" type="password" placeholder="Contraseña" autocomplete="current-password">
+    <button class="pri" onclick="entrar()" style="width:100%">Ingresar</button>
+    <p id="msg" style="color:var(--bad)"></p>
+  </div>
+
+  <div id="app" style="display:none">
+    <nav id="nav"></nav>
+    <div id="view"></div>
+  </div>
+</main>
+<div id="toast"></div>
+
+<script>
+// ============ CONFIGURACION ============
+const SUPA_URL = "https://ixpofphqqdczidykjnau.supabase.co";
+const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4cG9mcGhxcWRjemlkeWtqbmF1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM4OTgxODAsImV4cCI6MjEwOTQ3NDE4MH0.iJmD_jr-Q8AFyNrMMnVLWDx8nLVp7TXd8X--yqXjAFc";
+const DEFAULT_LIMIT = 120;   // minutos si el equipo no tiene limite en el panel
+const MAX_EVENTS = 10000;
+// =======================================
+
+const db = supabase.createClient(SUPA_URL, SUPA_KEY);
+
+const ETIQ = {
+  alta_usuario:"Alta de usuario", alta_activo:"Alta de equipo", login:"Ingreso",
+  prestamo:"Préstamo", devolucion:"Devolución",
+  incidencia_danado:"Incidencia: dañado", incidencia_incompleto:"Incidencia: incompleto",
+  incidencia_resuelta:"Incidencia resuelta", fuera_horario:"Fuera de horario",
+  acceso_denegado:"Acceso denegado", bloqueo_pendientes:"Bloqueado por vencidos",
+  reserva_bloqueada:"Equipo en uso por otro", vencido:"Préstamo vencido",
+  faltante:"Faltante en inventario", inconsistencia:"Inconsistencia (posible copia)",
+  tag_invalido:"Etiqueta inválida", mantenimiento:"Mantenimiento requerido"
+};
+const ALTAS = ["vencido","inconsistencia","tag_invalido","faltante","incidencia_danado","incidencia_incompleto","mantenimiento"];
+const AVISOS = ["acceso_denegado","fuera_horario","bloqueo_pendientes","reserva_bloqueada"];
+const ALERTAS = ALTAS.concat(AVISOS);
+
+let EV = [];        // eventos, mas nuevo primero
+let AI = {};        // assets_info
+let UI = {};        // users_info
+let A = {}, U = {}; // estado calculado
+let tab = "resumen";
+let chan = null;
+
+// ---------- utilidades ----------
+const $ = id => document.getElementById(id);
+function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function toast(m){ const t=$("toast"); t.textContent=m; t.style.display="block"; clearTimeout(toast.t); toast.t=setTimeout(()=>t.style.display="none",3500); }
+function tsOf(e){ return e.device_ts > 0 ? e.device_ts*1000 : new Date(e.created_at).getTime(); }
+function fdate(ms){ return new Date(ms).toLocaleString("es-BO",{dateStyle:"short",timeStyle:"short"}); }
+function fdur(min){
+  min = Math.max(0, Math.round(min));
+  if (min < 60) return min + " min";
+  const h = Math.floor(min/60), m = min % 60;
+  return h + " h" + (m ? " " + m + " min" : "");
+}
+function uname(id){ if(!id) return "—"; const n=UI[id]?.full_name; return n ? esc(n)+' <span class="mut">('+esc(id)+')</span>' : esc(id); }
+function aname(id){ if(!id) return "—"; const n=AI[id]?.name; return n ? esc(n)+' <span class="mut">('+esc(id)+')</span>' : esc(id); }
+function limitOf(id){ return AI[id]?.limit_min || DEFAULT_LIMIT; }
+function dayKey(ms){ const d=new Date(ms); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+
+// ---------- sesion ----------
+async function entrar(){
+  const {error} = await db.auth.signInWithPassword({email:$("email").value.trim(), password:$("pass").value});
+  $("msg").textContent = error ? error.message : "";
+  if(!error) iniciar();
+}
+async function salir(){ await db.auth.signOut(); location.reload(); }
+
+async function iniciar(){
+  const {data} = await db.auth.getSession();
+  if(!data.session) return;
+  $("login").style.display="none";
+  $("app").style.display="block";
+  $("hdr").style.display="flex";
+  $("who").textContent = data.session.user.email;
+  armarNav();
+  await recargar();
+  suscribir();
+  setTab("resumen");
+}
+
+async function fetchEvents(){
+  let all=[], from=0; const size=1000;
+  while(all.length < MAX_EVENTS){
+    const {data,error} = await db.from("events").select("*").order("id",{ascending:false}).range(from,from+size-1);
+    if(error){ toast("Error: "+error.message); break; }
+    all = all.concat(data);
+    if(data.length < size) break;
+    from += size;
+  }
+  return all;
+}
+async function fetchInfo(){
+  const a = await db.from("assets_info").select("*");
+  const u = await db.from("users_info").select("*");
+  AI = {}; UI = {};
+  (a.data||[]).forEach(r => AI[r.asset_id]=r);
+  (u.data||[]).forEach(r => UI[r.user_id]=r);
+}
+async function recargar(){
+  EV = await fetchEvents();
+  await fetchInfo();
+  render();
+}
+
+function suscribir(){
+  if(chan) return;
+  chan = db.channel("lab")
+    .on("postgres_changes",{event:"INSERT",schema:"public",table:"events"}, p => {
+      EV.unshift(p.new); render();
+      if(ALERTAS.includes(p.new.type)) toast("⚠ " + (ETIQ[p.new.type]||p.new.type));
+    })
+    .on("postgres_changes",{event:"*",schema:"public",table:"assets_info"}, async()=>{ await fetchInfo(); render(); })
+    .on("postgres_changes",{event:"*",schema:"public",table:"users_info"}, async()=>{ await fetchInfo(); render(); })
+    .subscribe(s => {
+      const on = s === "SUBSCRIBED";
+      $("dot").className = "dot" + (on ? " on" : "");
+      $("live").textContent = on ? "en vivo" : "reconectando…";
+    });
+}
+
+// ---------- calculo de estado ----------
+function compute(){
+  A = {}; U = {};
+  const chrono = [...EV].reverse();
+  for(const e of chrono){
+    const t = tsOf(e);
+    if(e.asset_id){
+      const a = A[e.asset_id] ??= {id:e.asset_id,status:0,holder:"",since:t,uses:0,level:0,last:t,incid:0};
+      a.last = t;
+      if(e.level) a.level = e.level;
+      switch(e.type){
+        case "alta_activo": a.status=0; a.holder=""; a.since=t; break;
+        case "prestamo": a.status=1; a.holder=e.user_id; a.since=t; a.uses++; break;
+        case "devolucion": a.status=0; a.holder=""; a.since=t; break;
+        case "incidencia_danado":
+        case "incidencia_incompleto": a.status=2; a.since=t; a.incid++; break;
+        case "incidencia_resuelta": a.status=0; a.holder=""; a.since=t; break;
+      }
+    }
+    if(e.user_id){
+      const u = U[e.user_id] ??= {id:e.user_id,level:0,loans:0,logins:0,incid:0,denied:0,last:t};
+      u.last = t;
+      if(e.type==="alta_usuario" || e.type==="login") u.level = e.level;
+      if(e.type==="prestamo") u.loans++;
+      if(e.type==="login") u.logins++;
+      if(e.type==="incidencia_danado" || e.type==="incidencia_incompleto") u.incid++;
+      if(AVISOS.includes(e.type)) u.denied++;
+    }
+  }
+  const now = Date.now();
+  for(const id in A){
+    const a = A[id];
+    a.limit = limitOf(id);
+    a.elapsed = a.status===1 ? (now - a.since)/60000 : 0;
+    a.overdue = a.status===1 && a.elapsed > a.limit;
+  }
+  for(const id in U){
+    U[id].overdue = Object.values(A).filter(a => a.overdue && a.holder===id).length;
+  }
+}
+
+// ---------- badges ----------
+function badgeEstado(a){
+  if(a.status===2) return '<span class="badge b-warn">En revisión</span>';
+  if(a.status===1) return a.overdue ? '<span class="badge b-bad">Vencido</span>' : '<span class="badge b-info">Prestado</span>';
+  return '<span class="badge b-ok">En sitio</span>';
+}
+function badgeTipo(t){
+  const cls = ALTAS.includes(t) ? "b-bad" : AVISOS.includes(t) ? "b-warn" : (t==="prestamo"||t==="login") ? "b-info" : "b-ok";
+  return '<span class="badge '+cls+'">'+esc(ETIQ[t]||t)+'</span>';
+}
+
+// ---------- pestañas ----------
+const TABS = {
+  resumen:   {label:"Resumen",   body:bResumen},
+  equipos:   {label:"Equipos",   shell:sEquipos,   body:bEquipos},
+  prestamos: {label:"Préstamos activos", body:bPrestamos},
+  historial: {label:"Historial", shell:sHistorial, body:bHistorial},
+  alertas:   {label:"Alertas",   body:bAlertas},
+  usuarios:  {label:"Usuarios",  body:bUsuarios}
+};
+function armarNav(){
+  $("nav").innerHTML = Object.keys(TABS).map(k => '<button data-tab="'+k+'">'+TABS[k].label+'</button>').join("");
+}
+function setTab(k){
+  tab = k;
+  document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("act", b.dataset.tab===k));
+  $("view").innerHTML = (TABS[k].shell ? TABS[k].shell() : "") + '<div id="body"></div>';
+  render();
+}
+function render(){
+  if(!$("app") || $("app").style.display==="none") return;
+  compute();
+  const b = $("body");
+  if(b) b.innerHTML = TABS[tab].body();
+}
+setInterval(render, 30000);   // refresca tiempos y vencimientos
+
+// ---------- RESUMEN ----------
+function bResumen(){
+  const as = Object.values(A);
+  const total = as.length;
+  const sitio = as.filter(a=>a.status===0).length;
+  const prest = as.filter(a=>a.status===1).length;
+  const rev = as.filter(a=>a.status===2).length;
+  const venc = as.filter(a=>a.overdue).length;
+  const hoy = dayKey(Date.now());
+  const prHoy = EV.filter(e=>e.type==="prestamo" && dayKey(tsOf(e))===hoy).length;
+  const hace24 = Date.now() - 86400000;
+  const al24 = EV.filter(e=>ALERTAS.includes(e.type) && tsOf(e)>=hace24).length;
+
+  // grafico: prestamos ultimos 14 dias
+  const dias=[]; for(let i=13;i>=0;i--){ const d=new Date(); d.setDate(d.getDate()-i); dias.push(dayKey(d.getTime())); }
+  const cnt = Object.fromEntries(dias.map(d=>[d,0]));
+  EV.forEach(e=>{ if(e.type==="prestamo"){ const k=dayKey(tsOf(e)); if(k in cnt) cnt[k]++; } });
+  const max = Math.max(1,...Object.values(cnt));
+  const bars = dias.map((d,i)=>{
+    const h = Math.round(cnt[d]/max*90), x = 10+i*39;
+    return '<rect x="'+x+'" y="'+(110-h)+'" width="28" height="'+h+'" rx="3" fill="var(--bar)"/>'
+      + '<text x="'+(x+14)+'" y="'+(106-h)+'" text-anchor="middle">'+(cnt[d]||"")+'</text>'
+      + '<text x="'+(x+14)+'" y="126" text-anchor="middle">'+d.slice(8)+'</text>';
+  }).join("");
+
+  const topA = as.slice().sort((a,b)=>b.uses-a.uses).filter(a=>a.uses>0).slice(0,5);
+  const topU = Object.values(U).slice().sort((a,b)=>b.loans-a.loans).filter(u=>u.loans>0).slice(0,5);
+  const ult = EV.slice(0,8);
+  const alr = EV.filter(e=>ALERTAS.includes(e.type)).slice(0,6);
+
+  return `
+  <div class="kpis">
+    <div class="kpi"><b>${total}</b><span>Equipos registrados</span></div>
+    <div class="kpi ok"><b>${sitio}</b><span>En sitio</span></div>
+    <div class="kpi"><b>${prest}</b><span>Prestados ahora</span></div>
+    <div class="kpi ${venc?'bad':''}"><b>${venc}</b><span>Vencidos</span></div>
+    <div class="kpi ${rev?'warn':''}"><b>${rev}</b><span>En revisión</span></div>
+    <div class="kpi"><b>${prHoy}</b><span>Préstamos hoy</span></div>
+    <div class="kpi ${al24?'warn':''}"><b>${al24}</b><span>Alertas (24 h)</span></div>
+  </div>
+  <div class="card"><h2>Préstamos de los últimos 14 días</h2>
+    <svg viewBox="0 0 560 135" width="100%" role="img" aria-label="Préstamos por día">${bars}</svg></div>
+  <div class="grid2">
+    <div class="card"><h2>Equipos más usados</h2>${
+      topA.length ? '<table>'+topA.map(a=>'<tr><td>'+aname(a.id)+'</td><td>'+a.uses+' usos</td></tr>').join("")+'</table>' : '<div class="empty">Sin datos todavía</div>'}</div>
+    <div class="card"><h2>Usuarios con más préstamos</h2>${
+      topU.length ? '<table>'+topU.map(u=>'<tr><td>'+uname(u.id)+'</td><td>'+u.loans+' préstamos</td></tr>').join("")+'</table>' : '<div class="empty">Sin datos todavía</div>'}</div>
+  </div>
+  <div class="grid2">
+    <div class="card"><h2>Últimos eventos</h2><div class="wrap">${tablaEv(ult)}</div></div>
+    <div class="card"><h2>Últimas alertas</h2><div class="wrap">${alr.length?tablaEv(alr):'<div class="empty">Sin alertas 🎉</div>'}</div></div>
+  </div>`;
+}
+function tablaEv(list){
+  if(!list.length) return '<div class="empty">Sin eventos</div>';
+  return '<table><thead><tr><th>Fecha</th><th>Evento</th><th>Usuario</th><th>Equipo</th></tr></thead><tbody>'
+    + list.map(e=>'<tr class="'+(ALTAS.includes(e.type)?'alerta':'')+'"><td>'+fdate(tsOf(e))+'</td><td>'+badgeTipo(e.type)+'</td><td>'+uname(e.user_id)+'</td><td>'+aname(e.asset_id)+'</td></tr>').join("")
+    + '</tbody></table>';
+}
+
+// ---------- EQUIPOS ----------
+function sEquipos(){
+  return '<div class="filters"><select id="fEst" onchange="render()"><option value="">Todos los estados</option><option value="0">En sitio</option><option value="1">Prestados</option><option value="v">Vencidos</option><option value="2">En revisión</option></select>'
+       + '<input id="fEq" type="search" placeholder="Buscar equipo o titular" oninput="render()"></div>';
+}
+function bEquipos(){
+  const est = $("fEst")?.value || "", q = ($("fEq")?.value || "").toLowerCase();
+  const list = Object.values(A).filter(a=>{
+    if(est==="v" && !a.overdue) return false;
+    if(est!=="" && est!=="v" && String(a.status)!==est) return false;
+    const txt = (a.id+" "+(AI[a.id]?.name||"")+" "+a.holder+" "+(UI[a.holder]?.full_name||"")).toLowerCase();
+    return txt.includes(q);
+  }).sort((a,b)=>a.id.localeCompare(b.id));
+  if(!list.length) return '<div class="card empty">No hay equipos. Graba una etiqueta con <b>A 3 OSC00001 120</b> en el Monitor Serie.</div>';
+  return '<div class="card wrap"><table><thead><tr><th>ID / Nombre</th><th>Nivel</th><th>Estado</th><th>Titular</th><th>Desde</th><th>Tiempo</th><th>Usos</th><th></th></tr></thead><tbody>'
+    + list.map(a=>{
+      const pct = Math.min(100, a.elapsed/a.limit*100);
+      const tiempo = a.status===1 ? '<div class="bar '+(a.overdue?'over':'')+'"><i style="width:'+pct+'%"></i></div><small class="mut">'+fdur(a.elapsed)+' / '+fdur(a.limit)+'</small>' : '<span class="mut">—</span>';
+      return '<tr class="'+(a.overdue?'alerta':'')+'"><td><a class="lnk" data-act="hist" data-id="'+esc(a.id)+'">'+aname(a.id)+'</a></td><td>'+(a.level||"—")+'</td><td>'+badgeEstado(a)+'</td><td>'+(a.status===1?uname(a.holder):"—")+'</td><td>'+fdate(a.since)+'</td><td>'+tiempo+'</td><td>'+a.uses+'</td><td><button data-act="editA" data-id="'+esc(a.id)+'">Editar</button></td></tr>';
+    }).join("") + '</tbody></table></div>'
+    + '<p class="mut">El nombre y el límite se guardan en el panel. El límite real del préstamo lo define la etiqueta (tercer dato del comando <b>A</b>); mantén ambos iguales.</p>';
+}
+async function editarEquipo(id){
+  const cur = AI[id] || {};
+  const name = prompt("Nombre del equipo "+id, cur.name || ""); if(name===null) return;
+  const lim = prompt("Límite de préstamo (minutos)", cur.limit_min || DEFAULT_LIMIT); if(lim===null) return;
+  const n = parseInt(lim,10);
+  const {error} = await db.from("assets_info").upsert({asset_id:id, name:name.trim().slice(0,80), limit_min:(n>0?n:DEFAULT_LIMIT), updated_at:new Date().toISOString()});
+  if(error) return toast("Error: "+error.message);
+  toast("Equipo actualizado"); await fetchInfo(); render();
+}
+
+// ---------- PRESTAMOS ACTIVOS ----------
+function bPrestamos(){
+  const act = Object.values(A).filter(a=>a.status===1).sort((a,b)=>b.elapsed-a.elapsed);
+  const rev = Object.values(A).filter(a=>a.status===2);
+  let h = '<div class="card"><h2>Equipos prestados ahora ('+act.length+')</h2>';
+  h += act.length ? '<div class="wrap"><table><thead><tr><th>Equipo</th><th>Titular</th><th>Desde</th><th>Transcurrido</th><th>Estado</th></tr></thead><tbody>'
+    + act.map(a=>'<tr class="'+(a.overdue?'alerta':'')+'"><td>'+aname(a.id)+'</td><td>'+uname(a.holder)+'</td><td>'+fdate(a.since)+'</td><td>'+fdur(a.elapsed)+' de '+fdur(a.limit)+'</td><td>'+badgeEstado(a)+'</td></tr>').join("")
+    + '</tbody></table></div>' : '<div class="empty">No hay equipos prestados</div>';
+  h += '</div><div class="card"><h2>En revisión por incidencia ('+rev.length+')</h2>';
+  h += rev.length ? '<div class="wrap"><table><thead><tr><th>Equipo</th><th>Desde</th><th>Último titular</th></tr></thead><tbody>'
+    + rev.map(a=>'<tr><td>'+aname(a.id)+'</td><td>'+fdate(a.since)+'</td><td>'+uname(a.holder)+'</td></tr>').join("")
+    + '</tbody></table></div><p class="mut">Un administrador lo habilita acercando su tarjeta y luego el equipo al lector.</p>' : '<div class="empty">Ninguno</div>';
+  return h + '</div>';
+}
+
+// ---------- HISTORIAL ----------
+function sHistorial(){
+  const tipos = Object.keys(ETIQ).map(t=>'<option value="'+t+'">'+ETIQ[t]+'</option>').join("");
+  return '<div class="filters"><input id="q" type="search" placeholder="Buscar usuario, equipo o tipo" oninput="render()">'
+    + '<select id="ft" onchange="render()"><option value="">Todos los tipos</option><option value="_alertas">Solo alertas</option>'+tipos+'</select>'
+    + '<input id="d1" type="date" onchange="render()"><input id="d2" type="date" onchange="render()">'
+    + '<button onclick="exportarCSV()">⬇ CSV</button><button class="dan" onclick="borrarTodo()">Borrar todo</button></div>';
+}
+function filtrados(){
+  const q=($("q")?.value||"").toLowerCase(), t=$("ft")?.value||"", d1=$("d1")?.value, d2=$("d2")?.value;
+  const m1 = d1 ? new Date(d1+"T00:00:00").getTime() : 0;
+  const m2 = d2 ? new Date(d2+"T23:59:59").getTime() : Infinity;
+  return EV.filter(e=>{
+    const ms = tsOf(e);
+    if(ms<m1 || ms>m2) return false;
+    if(t==="_alertas" && !ALERTAS.includes(e.type)) return false;
+    if(t && t!=="_alertas" && e.type!==t) return false;
+    if(q){ const txt=(e.type+" "+(ETIQ[e.type]||"")+" "+e.user_id+" "+e.asset_id+" "+(UI[e.user_id]?.full_name||"")+" "+(AI[e.asset_id]?.name||"")).toLowerCase(); if(!txt.includes(q)) return false; }
+    return true;
+  });
+}
+function bHistorial(){
+  const f = filtrados();
+  return '<div class="card"><div class="mut" style="margin-bottom:8px">'+f.length+' evento(s)'+(f.length>300?' · mostrando los 300 más recientes':'')+'</div><div class="wrap">'
+    + tablaEvNivel(f.slice(0,300)) + '</div></div>';
+}
+function tablaEvNivel(list){
+  if(!list.length) return '<div class="empty">Sin eventos</div>';
+  return '<table><thead><tr><th>Fecha</th><th>Evento</th><th>Usuario</th><th>Equipo</th><th>Nivel</th><th>Dispositivo</th></tr></thead><tbody>'
+    + list.map(e=>'<tr class="'+(ALTAS.includes(e.type)?'alerta':'')+'"><td>'+fdate(tsOf(e))+'</td><td>'+badgeTipo(e.type)+'</td><td>'+uname(e.user_id)+'</td><td>'+aname(e.asset_id)+'</td><td>'+e.level+'</td><td class="mut">'+esc(e.device)+'</td></tr>').join("")
+    + '</tbody></table>';
+}
+function exportarCSV(){
+  const f = filtrados();
+  const cab = ["fecha","evento","tipo","usuario","equipo","nivel","dispositivo"];
+  const filas = f.map(e=>[new Date(tsOf(e)).toISOString(), ETIQ[e.type]||e.type, e.type, e.user_id, e.asset_id, e.level, e.device]);
+  const csv = [cab].concat(filas).map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(",")).join("\r\n");
+  const blob = new Blob(["\uFEFF"+csv], {type:"text/csv;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "historial_lab_"+dayKey(Date.now())+".csv";
+  a.click(); URL.revokeObjectURL(a.href);
+}
+async function borrarTodo(){
+  if(prompt("Esto borra TODO el historial. Escribe BORRAR para confirmar:")!=="BORRAR") return;
+  const {error} = await db.from("events").delete().gt("id",0);
+  if(error) return toast("Error: "+error.message);
+  toast("Historial borrado"); await recargar();
+}
+
+// ---------- ALERTAS ----------
+function bAlertas(){
+  const lista = EV.filter(e=>ALERTAS.includes(e.type)).slice(0,200);
+  const graves = lista.filter(e=>ALTAS.includes(e.type)).length;
+  return '<div class="card"><h2>Alertas ('+lista.length+' recientes · '+graves+' graves)</h2><div class="wrap">'
+    + tablaEvNivel(lista) + '</div></div>'
+    + '<p class="mut">Rojo = grave (vencido, copia/etiqueta inválida, faltante, daño, mantenimiento). Amarillo = aviso (acceso denegado, fuera de horario, equipo en uso).</p>';
+}
+
+// ---------- USUARIOS ----------
+function bUsuarios(){
+  const list = Object.values(U).sort((a,b)=>b.loans-a.loans);
+  if(!list.length) return '<div class="card empty">Sin usuarios. Graba una tarjeta con <b>U 2 JUAN0001</b>.</div>';
+  return '<div class="card wrap"><table><thead><tr><th>Usuario</th><th>Nivel</th><th>Ingresos</th><th>Préstamos</th><th>Vencidos</th><th>Incidencias</th><th>Denegados</th><th>Último</th><th></th></tr></thead><tbody>'
+    + list.map(u=>'<tr class="'+(u.overdue?'alerta':'')+'"><td><a class="lnk" data-act="hist" data-id="'+esc(u.id)+'">'+uname(u.id)+'</a></td><td>'+(u.level||"—")+'</td><td>'+u.logins+'</td><td>'+u.loans+'</td><td>'+u.overdue+'</td><td>'+u.incid+'</td><td>'+u.denied+'</td><td>'+fdate(u.last)+'</td><td><button data-act="editU" data-id="'+esc(u.id)+'">Editar</button></td></tr>').join("")
+    + '</tbody></table></div>';
+}
+async function editarUsuario(id){
+  const n = prompt("Nombre completo de "+id, UI[id]?.full_name || ""); if(n===null) return;
+  const {error} = await db.from("users_info").upsert({user_id:id, full_name:n.trim().slice(0,80), updated_at:new Date().toISOString()});
+  if(error) return toast("Error: "+error.message);
+  toast("Usuario actualizado"); await fetchInfo(); render();
+}
+
+// ---------- clicks (delegacion; evita inyectar datos en onclick) ----------
+document.addEventListener("click", ev=>{
+  const tb = ev.target.closest("#nav button[data-tab]");
+  if(tb) return setTab(tb.dataset.tab);
+  const el = ev.target.closest("[data-act]"); if(!el) return;
+  const id = el.dataset.id;
+  if(el.dataset.act==="editA") editarEquipo(id);
+  if(el.dataset.act==="editU") editarUsuario(id);
+  if(el.dataset.act==="hist"){ setTab("historial"); $("q").value=id; render(); }
+});
+$("pass").addEventListener("keydown", e=>{ if(e.key==="Enter") entrar(); });
+
+iniciar();
+</script>
+</body>
+</html>
