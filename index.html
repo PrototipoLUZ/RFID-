@@ -55,7 +55,7 @@ tr.alerta td{background:var(--badbg)}
 .empty{color:var(--mut);padding:14px;text-align:center}
 #login{max-width:340px;margin:60px auto}
 #login input{width:100%;margin:5px 0}
-#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;padding:10px 16px;border-radius:8px;display:none;z-index:9}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;padding:10px 16px;border-radius:8px;display:none;z-index:9;max-width:90vw}
 .bar{height:8px;background:var(--line);border-radius:99px;overflow:hidden;min-width:90px}
 .bar i{display:block;height:100%;background:var(--ok)}
 .bar.over i{background:var(--bad)}
@@ -90,14 +90,14 @@ svg text{fill:var(--mut);font-size:10px}
     <div id="view"></div>
   </div>
 </main>
-<div id="mbk"><div id="mbx" class="card"></div></div>
+<div id="mbk" onclick="if(event.target===this)cerrarModal()"><div id="mbx" class="card"></div></div>
 <div id="toast"></div>
 
 <script>
 // ============ CONFIGURACION ============
 const SUPA_URL = "https://ixpofphqqdczidykjnau.supabase.co";
 const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4cG9mcGhxcWRjemlkeWtqbmF1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM4OTgxODAsImV4cCI6MjEwOTQ3NDE4MH0.iJmD_jr-Q8AFyNrMMnVLWDx8nLVp7TXd8X--yqXjAFc";
-const DEFAULT_LIMIT = 120;   // minutos si el equipo no tiene limite en el panel
+const DEFAULT_LIMIT = 120;   // minutos si el equipo no tiene límite en el panel
 const MAX_EVENTS = 10000;
 // =======================================
 
@@ -123,12 +123,14 @@ let UI = {};        // users_info
 let A = {}, U = {}; // estado calculado
 let tab = "resumen";
 let chan = null;
-let CMD = [];   // solicitudes de alta remota
+let CMD = [];       // solicitudes / comandos
+let MODOLECT = null;// {user_id, level} pendiente de leer etiqueta
+let tmrVenc = null;
 
 // ---------- utilidades ----------
 const $ = id => document.getElementById(id);
 function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
-function toast(m){ const t=$("toast"); t.textContent=m; t.style.display="block"; clearTimeout(toast.t); toast.t=setTimeout(()=>t.style.display="none",3500); }
+function toast(m){ const t=$("toast"); t.textContent=m; t.style.display="block"; clearTimeout(toast.t); toast.t=setTimeout(()=>t.style.display="none",4000); }
 function tsOf(e){ return e.device_ts > 0 ? e.device_ts*1000 : new Date(e.created_at).getTime(); }
 function fdate(ms){ return new Date(ms).toLocaleString("es-BO",{dateStyle:"short",timeStyle:"short"}); }
 function fdur(min){
@@ -161,13 +163,15 @@ async function iniciar(){
   await recargar();
   suscribir();
   setTab("resumen");
+  if(!tmrVenc) tmrVenc = setInterval(() => { if($("app").style.display!=="none") render(); }, 30000);
 }
 
+// ---------- fetch ----------
 async function fetchEvents(){
   let all=[], from=0; const size=1000;
   while(all.length < MAX_EVENTS){
     const {data,error} = await db.from("events").select("*").order("id",{ascending:false}).range(from,from+size-1);
-    if(error){ toast("Error: "+error.message); break; }
+    if(error){ toast("Error eventos: "+error.message); break; }
     all = all.concat(data);
     if(data.length < size) break;
     from += size;
@@ -175,11 +179,22 @@ async function fetchEvents(){
   return all;
 }
 async function fetchInfo(){
-  const a = await db.from("assets_info").select("*");
-  const u = await db.from("users_info").select("*");
+  const [a,u] = await Promise.all([
+    db.from("assets_info").select("*"),
+    db.from("users_info").select("*")
+  ]);
   AI = {}; UI = {};
   (a.data||[]).forEach(r => AI[r.asset_id]=r);
   (u.data||[]).forEach(r => UI[r.user_id]=r);
+}
+async function fetchCmd(){
+  // comandos recientes (lector) - tolerante a esquemas
+  const {data,error} = await db.from("commands").select("*").order("created_at",{ascending:false}).limit(200);
+  if(error){ CMD = []; return; }
+  CMD = data || [];
+  // si hay un comando modo_lectura pendiente, guardamos el contexto
+  const pend = CMD.find(c => c.type === "modo_lectura" && (c.status==="pendiente" || c.status==null));
+  MODOLECT = pend ? { user_id: pend.user_id, level: pend.level, id: pend.id } : null;
 }
 async function recargar(){
   EV = await fetchEvents();
@@ -192,9 +207,16 @@ function suscribir(){
   if(chan) return;
   chan = db.channel("lab")
     .on("postgres_changes",{event:"INSERT",schema:"public",table:"events"}, p => {
-      EV.unshift(p.new); render();
-      if(p.new.type==="login") abrirPrestamo(p.new); else if(M && p.new.user_id===M.uid) eventoM(p.new);
+      EV.unshift(p.new);
+      // si llega un login y hay modo lectura activo, abrimos prestamo
+      if(p.new.type==="login"){
+        if(MODOLECT && MODOLECT.user_id===p.new.user_id) abrirPrestamo(p.new);
+        else toast("Ingreso registrado: "+(UI[p.new.user_id]?.full_name || p.new.user_id));
+      }
+      if(p.new.type==="prestamo") toast("Préstamo: "+aname(p.new.asset_id));
+      if(p.new.type==="devolucion") toast("Devolución: "+aname(p.new.asset_id));
       if(ALERTAS.includes(p.new.type)) toast("⚠ " + (ETIQ[p.new.type]||p.new.type));
+      render();
     })
     .on("postgres_changes",{event:"*",schema:"public",table:"assets_info"}, async()=>{ await fetchInfo(); render(); })
     .on("postgres_changes",{event:"*",schema:"public",table:"users_info"}, async()=>{ await fetchInfo(); render(); })
@@ -213,7 +235,7 @@ function compute(){
   for(const e of chrono){
     const t = tsOf(e);
     if(e.asset_id){
-      const a = A[e.asset_id] ??= {id:e.asset_id,status:0,holder:"",since:t,uses:0,level:0,last:t,incid:0};
+      const a = A[e.asset_id] ??= {id:e.asset_id,status:0,holder:"",since:t,uses:0,level:0,last:t,incid:0,ll:0};
       a.last = t;
       if(e.level) a.level = e.level;
       switch(e.type){
@@ -228,7 +250,7 @@ function compute(){
     if(e.user_id){
       const u = U[e.user_id] ??= {id:e.user_id,level:0,loans:0,logins:0,incid:0,denied:0,last:t};
       u.last = t;
-      if(e.type==="alta_usuario" || e.type==="login") u.level = e.level;
+      if(e.level) u.level = e.level;
       if(e.type==="prestamo") u.loans++;
       if(e.type==="login") u.logins++;
       if(e.type==="incidencia_danado" || e.type==="incidencia_incompleto") u.incid++;
@@ -265,11 +287,15 @@ const TABS = {
   prestamos: {label:"Préstamos activos", body:bPrestamos},
   historial: {label:"Historial", shell:sHistorial, body:bHistorial},
   alertas:   {label:"Alertas",   body:bAlertas},
-  usuarios:  {label:"Usuarios",  body:bUsuarios},
-  altas:     {label:"Altas",     shell:sAltas, body:bAltas}
+  usuarios:  {label:"Usuarios",  shell:sUsuarios, body:bUsuarios},
+  altas:     {label:"Altas / Lector", shell:sAltas, body:bAltas}
 };
 function armarNav(){
   $("nav").innerHTML = Object.keys(TABS).map(k => '<button data-tab="'+k+'">'+TABS[k].label+'</button>').join("");
+  $("nav").addEventListener("click", e=>{
+    const b = e.target.closest("button[data-tab]");
+    if(b) setTab(b.dataset.tab);
+  });
 }
 function setTab(k){
   tab = k;
@@ -283,7 +309,6 @@ function render(){
   const b = $("body");
   if(b) b.innerHTML = TABS[tab].body();
 }
-setInterval(render, 30000);   // refresca tiempos y vencimientos
 
 // ---------- RESUMEN ----------
 function bResumen(){
@@ -298,7 +323,6 @@ function bResumen(){
   const hace24 = Date.now() - 86400000;
   const al24 = EV.filter(e=>ALERTAS.includes(e.type) && tsOf(e)>=hace24).length;
 
-  // grafico: prestamos ultimos 14 dias
   const dias=[]; for(let i=13;i>=0;i--){ const d=new Date(); d.setDate(d.getDate()-i); dias.push(dayKey(d.getTime())); }
   const cnt = Object.fromEntries(dias.map(d=>[d,0]));
   EV.forEach(e=>{ if(e.type==="prestamo"){ const k=dayKey(tsOf(e)); if(k in cnt) cnt[k]++; } });
@@ -341,14 +365,15 @@ function bResumen(){
 function tablaEv(list){
   if(!list.length) return '<div class="empty">Sin eventos</div>';
   return '<table><thead><tr><th>Fecha</th><th>Evento</th><th>Usuario</th><th>Equipo</th></tr></thead><tbody>'
-    + list.map(e=>'<tr class="'+(ALTAS.includes(e.type)?'alerta':'')+'"><td>'+fdate(tsOf(e))+'</td><td>'+badgeTipo(e.type)+'</td><td>'+uname(e.user_id)+'</td><td>'+aname(e.asset_id)+'</td></tr>').join("")
+    + list.map(e=>'<tr class="'+(ALERTAS.includes(e.type)?'alerta':'')+'"><td>'+fdate(tsOf(e))+'</td><td>'+badgeTipo(e.type)+'</td><td>'+uname(e.user_id)+'</td><td>'+aname(e.asset_id)+'</td></tr>').join("")
     + '</tbody></table>';
 }
 
 // ---------- EQUIPOS ----------
 function sEquipos(){
   return '<div class="filters"><select id="fEst" onchange="render()"><option value="">Todos los estados</option><option value="0">En sitio</option><option value="1">Prestados</option><option value="v">Vencidos</option><option value="2">En revisión</option></select>'
-       + '<input id="fEq" type="search" placeholder="Buscar equipo o titular" oninput="render()"></div>';
+       + '<input id="fEq" type="search" placeholder="Buscar equipo o titular" oninput="render()">'
+       + '<button class="pri" data-act="nuevoEquipo">+ Nuevo equipo</button></div>';
 }
 function bEquipos(){
   const est = $("fEst")?.value || "", q = ($("fEq")?.value || "").toLowerCase();
@@ -358,232 +383,9 @@ function bEquipos(){
     const txt = (a.id+" "+(AI[a.id]?.name||"")+" "+a.holder+" "+(UI[a.holder]?.full_name||"")).toLowerCase();
     return txt.includes(q);
   }).sort((a,b)=>a.id.localeCompare(b.id));
-  if(!list.length) return '<div class="card empty">No hay equipos. Graba una etiqueta con <b>A 3 OSC00001 120</b> en el Monitor Serie.</div>';
+  if(!list.length) return '<div class="card empty">'+(Object.keys(A).length?'Sin resultados para el filtro':'No hay equipos. Registra un alta con <b>Nuevo equipo</b>.')+'</div>';
   return '<div class="card wrap"><table><thead><tr><th>ID / Nombre</th><th>Nivel</th><th>Estado</th><th>Titular</th><th>Desde</th><th>Tiempo</th><th>Usos</th><th></th></tr></thead><tbody>'
     + list.map(a=>{
       const pct = Math.min(100, a.elapsed/a.limit*100);
       const tiempo = a.status===1 ? '<div class="bar '+(a.overdue?'over':'')+'"><i style="width:'+pct+'%"></i></div><small class="mut">'+fdur(a.elapsed)+' / '+fdur(a.limit)+'</small>' : '<span class="mut">—</span>';
-      return '<tr class="'+(a.overdue?'alerta':'')+'"><td><a class="lnk" data-act="hist" data-id="'+esc(a.id)+'">'+aname(a.id)+'</a></td><td>'+(a.level||"—")+'</td><td>'+badgeEstado(a)+'</td><td>'+(a.status===1?uname(a.holder):"—")+'</td><td>'+fdate(a.since)+'</td><td>'+tiempo+'</td><td>'+a.uses+'</td><td><button data-act="editA" data-id="'+esc(a.id)+'">Editar</button></td></tr>';
-    }).join("") + '</tbody></table></div>'
-    + '<p class="mut">El nombre y el límite se guardan en el panel. El límite real del préstamo lo define la etiqueta (tercer dato del comando <b>A</b>); mantén ambos iguales.</p>';
-}
-async function editarEquipo(id){
-  const cur = AI[id] || {};
-  const name = prompt("Nombre del equipo "+id, cur.name || ""); if(name===null) return;
-  const lim = prompt("Límite de préstamo (minutos)", cur.limit_min || DEFAULT_LIMIT); if(lim===null) return;
-  const n = parseInt(lim,10);
-  const {error} = await db.from("assets_info").upsert({asset_id:id, name:name.trim().slice(0,80), limit_min:(n>0?n:DEFAULT_LIMIT), updated_at:new Date().toISOString()});
-  if(error) return toast("Error: "+error.message);
-  toast("Equipo actualizado"); await fetchInfo(); render();
-}
-
-// ---------- PRESTAMOS ACTIVOS ----------
-function bPrestamos(){
-  const act = Object.values(A).filter(a=>a.status===1).sort((a,b)=>b.elapsed-a.elapsed);
-  const rev = Object.values(A).filter(a=>a.status===2);
-  let h = '<div class="card"><h2>Equipos prestados ahora ('+act.length+')</h2>';
-  h += act.length ? '<div class="wrap"><table><thead><tr><th>Equipo</th><th>Titular</th><th>Desde</th><th>Transcurrido</th><th>Estado</th></tr></thead><tbody>'
-    + act.map(a=>'<tr class="'+(a.overdue?'alerta':'')+'"><td>'+aname(a.id)+'</td><td>'+uname(a.holder)+'</td><td>'+fdate(a.since)+'</td><td>'+fdur(a.elapsed)+' de '+fdur(a.limit)+'</td><td>'+badgeEstado(a)+'</td></tr>').join("")
-    + '</tbody></table></div>' : '<div class="empty">No hay equipos prestados</div>';
-  h += '</div><div class="card"><h2>En revisión por incidencia ('+rev.length+')</h2>';
-  h += rev.length ? '<div class="wrap"><table><thead><tr><th>Equipo</th><th>Desde</th><th>Último titular</th></tr></thead><tbody>'
-    + rev.map(a=>'<tr><td>'+aname(a.id)+'</td><td>'+fdate(a.since)+'</td><td>'+uname(a.holder)+'</td></tr>').join("")
-    + '</tbody></table></div><p class="mut">Un administrador lo habilita acercando su tarjeta y luego el equipo al lector.</p>' : '<div class="empty">Ninguno</div>';
-  return h + '</div>';
-}
-
-// ---------- HISTORIAL ----------
-function sHistorial(){
-  const tipos = Object.keys(ETIQ).map(t=>'<option value="'+t+'">'+ETIQ[t]+'</option>').join("");
-  return '<div class="filters"><input id="q" type="search" placeholder="Buscar usuario, equipo o tipo" oninput="render()">'
-    + '<select id="ft" onchange="render()"><option value="">Todos los tipos</option><option value="_alertas">Solo alertas</option>'+tipos+'</select>'
-    + '<input id="d1" type="date" onchange="render()"><input id="d2" type="date" onchange="render()">'
-    + '<button onclick="exportarCSV()">⬇ CSV</button><button class="dan" onclick="borrarTodo()">Borrar todo</button></div>';
-}
-function filtrados(){
-  const q=($("q")?.value||"").toLowerCase(), t=$("ft")?.value||"", d1=$("d1")?.value, d2=$("d2")?.value;
-  const m1 = d1 ? new Date(d1+"T00:00:00").getTime() : 0;
-  const m2 = d2 ? new Date(d2+"T23:59:59").getTime() : Infinity;
-  return EV.filter(e=>{
-    const ms = tsOf(e);
-    if(ms<m1 || ms>m2) return false;
-    if(t==="_alertas" && !ALERTAS.includes(e.type)) return false;
-    if(t && t!=="_alertas" && e.type!==t) return false;
-    if(q){ const txt=(e.type+" "+(ETIQ[e.type]||"")+" "+e.user_id+" "+e.asset_id+" "+(UI[e.user_id]?.full_name||"")+" "+(AI[e.asset_id]?.name||"")).toLowerCase(); if(!txt.includes(q)) return false; }
-    return true;
-  });
-}
-function bHistorial(){
-  const f = filtrados();
-  return '<div class="card"><div class="mut" style="margin-bottom:8px">'+f.length+' evento(s)'+(f.length>300?' · mostrando los 300 más recientes':'')+'</div><div class="wrap">'
-    + tablaEvNivel(f.slice(0,300)) + '</div></div>';
-}
-function tablaEvNivel(list){
-  if(!list.length) return '<div class="empty">Sin eventos</div>';
-  return '<table><thead><tr><th>Fecha</th><th>Evento</th><th>Usuario</th><th>Equipo</th><th>Nivel</th><th>Dispositivo</th></tr></thead><tbody>'
-    + list.map(e=>'<tr class="'+(ALTAS.includes(e.type)?'alerta':'')+'"><td>'+fdate(tsOf(e))+'</td><td>'+badgeTipo(e.type)+'</td><td>'+uname(e.user_id)+'</td><td>'+aname(e.asset_id)+'</td><td>'+e.level+'</td><td class="mut">'+esc(e.device)+'</td></tr>').join("")
-    + '</tbody></table>';
-}
-function exportarCSV(){
-  const f = filtrados();
-  const cab = ["fecha","evento","tipo","usuario","equipo","nivel","dispositivo"];
-  const filas = f.map(e=>[new Date(tsOf(e)).toISOString(), ETIQ[e.type]||e.type, e.type, e.user_id, e.asset_id, e.level, e.device]);
-  const csv = [cab].concat(filas).map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(",")).join("\r\n");
-  const blob = new Blob(["\uFEFF"+csv], {type:"text/csv;charset=utf-8"});
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "historial_lab_"+dayKey(Date.now())+".csv";
-  a.click(); URL.revokeObjectURL(a.href);
-}
-async function borrarTodo(){
-  if(prompt("Esto borra TODO el historial. Escribe BORRAR para confirmar:")!=="BORRAR") return;
-  const {error} = await db.from("events").delete().gt("id",0);
-  if(error) return toast("Error: "+error.message);
-  toast("Historial borrado"); await recargar();
-}
-
-// ---------- ALERTAS ----------
-function bAlertas(){
-  const lista = EV.filter(e=>ALERTAS.includes(e.type)).slice(0,200);
-  const graves = lista.filter(e=>ALTAS.includes(e.type)).length;
-  return '<div class="card"><h2>Alertas ('+lista.length+' recientes · '+graves+' graves)</h2><div class="wrap">'
-    + tablaEvNivel(lista) + '</div></div>'
-    + '<p class="mut">Rojo = grave (vencido, copia/etiqueta inválida, faltante, daño, mantenimiento). Amarillo = aviso (acceso denegado, fuera de horario, equipo en uso).</p>';
-}
-
-// ---------- USUARIOS ----------
-function bUsuarios(){
-  const list = Object.values(U).sort((a,b)=>b.loans-a.loans);
-  if(!list.length) return '<div class="card empty">Sin usuarios. Graba una tarjeta con <b>U 2 JUAN0001</b>.</div>';
-  return '<div class="card wrap"><table><thead><tr><th>Usuario</th><th>Nivel</th><th>Ingresos</th><th>Préstamos</th><th>Vencidos</th><th>Incidencias</th><th>Denegados</th><th>Último</th><th>Datos</th><th></th></tr></thead><tbody>'
-    + list.map(u=>'<tr class="'+(u.overdue?'alerta':'')+'"><td><a class="lnk" data-act="hist" data-id="'+esc(u.id)+'">'+uname(u.id)+'</a></td><td>'+(u.level||"—")+'</td><td>'+u.logins+'</td><td>'+u.loans+'</td><td>'+u.overdue+'</td><td>'+u.incid+'</td><td>'+u.denied+'</td><td>'+fdate(u.last)+'</td><td>'+esc(((UI[u.id]?.career||"")+" "+(UI[u.id]?.doc||"")).trim())+'</td><td><button data-act="editU" data-id="'+esc(u.id)+'">Editar</button> <button data-act="rewU" data-id="'+esc(u.id)+'">Regrabar tarjeta</button></td></tr>').join("")
-    + '</tbody></table></div>';
-}
-async function editarUsuario(id){
-  const n = prompt("Nombre completo de "+id, UI[id]?.full_name || ""); if(n===null) return;
-  const {error} = await db.from("users_info").upsert({user_id:id, full_name:n.trim().slice(0,80), updated_at:new Date().toISOString()});
-  if(error) return toast("Error: "+error.message);
-  toast("Usuario actualizado"); await fetchInfo(); render();
-}
-
-// ---------- ALTAS REMOTAS (equipos y tarjetas desde la web) ----------
-async function fetchCmd(){
-  const r = await db.from("commands").select("*").order("id",{ascending:false}).limit(30);
-  CMD = r.data || [];
-}
-function sAltas(){
-  return '<div class="card"><h2>Registrar equipo o tarjeta</h2><div class="filters">'
-    + '<select id="aK"><option value="A">Equipo</option><option value="U">Usuario (tarjeta)</option></select>'
-    + '<input id="aId" placeholder="ID (vacío = automático en usuarios)" maxlength="8">'
-    + '<input id="aN" placeholder="Nombre completo">'
-    + '<input id="aD" placeholder="CI / documento (usuarios)">'
-    + '<input id="aC" placeholder="Carrera / curso (usuarios)">'
-    + '<select id="aL" title="Nivel (equipo: nivel requerido · usuario: su nivel)"><option>1</option><option>2</option><option>3</option><option>4</option></select>'
-    + '<input id="aM" type="number" min="1" value="'+DEFAULT_LIMIT+'" title="Límite en minutos (solo equipos)" style="width:90px">'
-    + '<button class="pri" onclick="crearAlta()">Enviar al lector</button></div>'
-    + '<p class="mut">Tras enviar, acerca una tarjeta/etiqueta <b>en blanco</b> al lector del ESP32 (tienes 60 s). Nivel 4 = administrador.</p></div>';
-}
-async function crearAlta(){
-  const kind = $("aK").value;
-  const nm = $("aN").value.trim().slice(0,80);
-  if(kind==="U" && !nm) return toast("Escribe el nombre completo del usuario");
-  let id = $("aId").value.trim().toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,8);
-  if(!id && kind==="U") id = genId(nm);
-  if(!id) return toast("Escribe un ID válido");
-  if(kind==="U" && U[id] && !confirm("El usuario "+id+" ya existe. ¿Regrabar su tarjeta?")) return;
-  if(kind==="A" && A[id] && !confirm("El equipo "+id+" ya existe. ¿Regrabar y reiniciar su historial?")) return;
-  const lim = kind==="A" ? Math.max(1, parseInt($("aM").value,10) || DEFAULT_LIMIT) : 0;
-  const {error} = await db.from("commands").insert({kind, ext_id:id, level:+$("aL").value, limit_min:lim});
-  if(error) return toast("Error: "+error.message);
-  const now = new Date().toISOString();
-  if(kind==="A") await db.from("assets_info").upsert({asset_id:id, name:nm || AI[id]?.name || "", limit_min:lim, updated_at:now});
-  else await db.from("users_info").upsert({user_id:id, full_name:nm, doc:$("aD").value.trim().slice(0,30), career:$("aC").value.trim().slice(0,60), updated_at:now});
-  toast("Enviado ("+id+"). Acerca la tarjeta al lector."); await fetchCmd(); await fetchInfo(); render();
-}
-function genId(nm){
-  const ini = nm.toUpperCase().normalize("NFD").replace(/[^A-Z ]/g,"").split(/\s+/).filter(Boolean).map(w=>w[0]).join("").slice(0,4) || "USR";
-  let id; do { id = ini + (Math.floor(Math.random()*9000)+1000); } while(U[id] || UI[id]);
-  return id;
-}
-async function regrabarUsuario(id){
-  const lv = parseInt(prompt("Nivel de "+id+" (1-4) para regrabar su tarjeta", U[id]?.level||1),10);
-  if(!(lv>=1 && lv<=4)) return;
-  const {error} = await db.from("commands").insert({kind:"U", ext_id:id, level:lv, limit_min:0});
-  if(error) return toast("Error: "+error.message);
-  toast("Acerca la tarjeta de "+id+" al lector (60 s)"); await fetchCmd(); render();
-}
-async function cancelarAlta(id){
-  await db.from("commands").update({status:"cancelled"}).eq("id",id);
-  await fetchCmd(); render();
-}
-function bAltas(){
-  if(!CMD.length) return '<div class="card empty">Sin solicitudes todavía</div>';
-  const st = {pending:["b-warn","Esperando tarjeta"],done:["b-ok","Grabada"],error:["b-bad","Error"],expired:["b-bad","Expirada"],cancelled:["b-info","Cancelada"]};
-  return '<div class="card wrap"><table><thead><tr><th>Fecha</th><th>Tipo</th><th>ID</th><th>Nivel</th><th>Límite</th><th>Estado</th><th></th></tr></thead><tbody>'
-    + CMD.map(c=>{ const s = st[c.status] || ["b-info",c.status];
-      return '<tr><td>'+fdate(new Date(c.created_at).getTime())+'</td><td>'+(c.kind==="A"?"Equipo":"Usuario")+'</td><td>'+esc(c.ext_id)+'</td><td>'+c.level+'</td><td>'+(c.kind==="A"?fdur(c.limit_min):"—")+'</td><td><span class="badge '+s[0]+'">'+s[1]+'</span></td><td>'+(c.status==="pending"?'<button data-act="cancelC" data-id="'+c.id+'">Cancelar</button>':'')+'</td></tr>'; }).join("")
-    + '</tbody></table></div>';
-}
-
-// ---------- VENTANA FLOTANTE DE PRESTAMO ----------
-const PREST_VENTANA = 60000;   // debe ser igual a SESSION_MS del firmware
-let M = null, Mt = null;
-function abrirPrestamo(e){
-  cerrarPrestamo();
-  M = {uid:e.user_id, step:0, min:DEFAULT_LIMIT, until:Date.now()+PREST_VENTANA};
-  $("mbk").style.display = "flex"; pintarM();
-  Mt = setInterval(()=>{ if(!M) return; if(Date.now()>M.until) return cerrarPrestamo();
-    const c=$("mcd"); if(c) c.textContent="Sesión del lector: "+Math.round((M.until-Date.now())/1000)+" s"; },1000);
-}
-function pintarM(){
-  if(!M) return; compute();
-  const id=M.uid, u=U[id]||{}, act=Object.values(A).filter(a=>a.status===1 && a.holder===id).length, bloq=(u.overdue||0)>0;
-  let h = '<h2>Préstamo · '+uname(id)+'</h2>'+(UI[id]?.career?'<p class="mut">'+esc(UI[id].career)+'</p>':'')+'<p>Nivel <b>'+(u.level||"—")+'</b> · Préstamos <b>'+(u.loans||0)+'</b> · Activos <b>'+act+'</b> · Vencidos <b>'+(u.overdue||0)+'</b></p>';
-  if(bloq) h += '<p><span class="badge b-bad">Bloqueado: tiene préstamos vencidos</span></p>';
-  if(M.err) h += '<p><span class="badge b-warn">'+esc(M.err)+'</span></p>';
-  if(M.step===0){
-    h += '<p>Tiempo del préstamo:</p><div class="filters"><select id="mT">'+[30,60,120,180,240,480].map(m=>'<option value="'+m+'"'+(m===M.min?' selected':'')+'>'+fdur(m)+'</option>').join("")+'</select>'
-      + '<input id="mC" type="number" min="1" placeholder="otro (min)" style="width:120px"></div>'
-      + '<p class="mut">Autoriza y luego acerca el equipo al lector.</p><button class="pri" '+(bloq?'disabled':'')+' onclick="autorizarM()">Autorizar préstamo</button> ';
-  } else if(M.step===1){
-    h += '<p><span class="badge b-info">Autorizado por '+fdur(M.min)+'</span> Esperando el equipo… acércalo al lector.</p>';
-  } else {
-    h += '<p><span class="badge b-ok">✔ Préstamo registrado</span></p><p>'+aname(M.asset)+' · hasta '+new Date(M.hasta).toLocaleTimeString("es-BO",{timeStyle:"short"})+'</p>';
-  }
-  $("mbx").innerHTML = h + '<button onclick="cerrarPrestamo()">'+(M.step===2?"Cerrar":"Cancelar")+'</button> <small id="mcd" class="mut"></small>';
-}
-async function autorizarM(){
-  const min = Math.max(1, parseInt($("mC").value,10) || parseInt($("mT").value,10));
-  const {data,error} = await db.from("commands").insert({kind:"L", ext_id:M.uid, level:(U[M.uid]?.level||1), limit_min:min}).select().single();
-  if(error) return toast("Error: "+error.message);
-  M.authId=data.id; M.min=min; M.step=1; M.err=""; M.until=Date.now()+PREST_VENTANA; pintarM();
-}
-function eventoM(e){
-  if(e.type==="prestamo"){ M.step=2; M.asset=e.asset_id; M.hasta=Date.now()+M.min*60000; M.err=""; }
-  else if(AVISOS.includes(e.type)) M.err=(ETIQ[e.type]||e.type)+(e.asset_id?" · "+e.asset_id:"");
-  else return;
-  pintarM();
-}
-function cerrarPrestamo(){
-  if(M && M.authId && M.step===1) db.from("commands").update({status:"cancelled"}).eq("id",M.authId).then(()=>fetchCmd());
-  M=null; clearInterval(Mt); $("mbk").style.display="none";
-}
-
-// ---------- clicks (delegacion; evita inyectar datos en onclick) ----------
-document.addEventListener("click", ev=>{
-  const tb = ev.target.closest("#nav button[data-tab]");
-  if(tb) return setTab(tb.dataset.tab);
-  const el = ev.target.closest("[data-act]"); if(!el) return;
-  const id = el.dataset.id;
-  if(el.dataset.act==="editA") editarEquipo(id);
-  if(el.dataset.act==="editU") editarUsuario(id);
-  if(el.dataset.act==="cancelC") cancelarAlta(id);
-  if(el.dataset.act==="rewU") regrabarUsuario(id);
-  if(el.dataset.act==="hist"){ setTab("historial"); $("q").value=id; render(); }
-});
-$("pass").addEventListener("keydown", e=>{ if(e.key==="Enter") entrar(); });
-
-iniciar();
-</script>
-</body>
-</html>
+      return '<tr class="'+(a.overdue?'alerta':'')+'"><td><a class="lnk" data-act="hist" data-id="'+esc(a.id)+'">'+aname(a.id)+'</a></td><td>'+(a.level||"—")+'</td><td>'+badgeEstado(a)+'</td><td>'+(a.status===1?uname(a.holder):"—")+'</td><td>'+fdate(a.since)+'</td><td>'+tiempo+'</td><td>'+a.uses+'</td><td><button data-act="editA" data-id="
